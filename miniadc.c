@@ -862,6 +862,20 @@ int send_files_list(context_t *ctx, int fd) {
 
 }
 
+peer_t *find_peer(context_t *ctx, char* sid) {
+
+	peer_t *out = ctx->first_peer;
+
+	while ( out != NULL) {
+		if ( strcmp(sid, out->sid) == 0 ) {
+			return out;
+		}
+		out = out->next;
+	}
+
+	return NULL;
+}
+
 file_t *find_file_with_hash(dir_t *dir, char* tth) {
 
 	file_t *file = dir->first_file;
@@ -1246,8 +1260,6 @@ int process_d_message(context_t* ctx, char *message) {
 
 int process_b_message(context_t* ctx, char *message) {
 
-	printf(message);
-
 	/* this message is not valid */
 	if ( strlen(message) < 5 ) {
 		return -1;
@@ -1304,7 +1316,9 @@ int process_b_message(context_t* ctx, char *message) {
 
 		char *nick = NULL;
 		struct in_addr addr;
+		int addrFound = 0;
 		char cid[HASH_LEN_B32];
+		int cidFound = 0;
 
 		char *next = strtok(NULL, " ");
 
@@ -1317,6 +1331,7 @@ int process_b_message(context_t* ctx, char *message) {
 					continue;
 				}
 				memcpy(cid, next + 2, HASH_LEN_B32);
+				cidFound = 1;
 			} else if ( strncmp(next, "NI", 2) == 0) {
 				nick = (char *) malloc(strlen(next+2) + 1);
 				strcpy(nick, next+2);
@@ -1325,17 +1340,44 @@ int process_b_message(context_t* ctx, char *message) {
 				if ( inet_aton(next+2, &addr) == 0 ) {
 					printf("Error parsing address\n");
 				}
+				addrFound = 1;
 
 			}
 
 			next = strtok(NULL,  " ");
 		}
 
-		peer_t *peer = create_peer(sid, cid, nick, &addr);
-		peer->next = ctx->first_peer;
-		ctx->first_peer = peer;
+		peer_t *peer = find_peer(ctx, sid);
 
-		printf("Peer %s (%s) on ip %s available\n", peer->nick, peer->sid, inet_ntoa(addr));
+		if ( peer == NULL ) {
+
+			peer = create_peer(sid, cid, nick, &addr);
+			peer->next = ctx->first_peer;
+			ctx->first_peer = peer;
+
+			printf("Peer %s (%s) on ip %s available\n", peer->nick, peer->sid, inet_ntoa(addr));
+
+		} else {
+
+			if (nick != NULL) {
+				free(peer->nick);
+				peer->nick = (char *) malloc(strlen(nick) + 1);
+				strcpy(peer->nick, nick);
+				printf("Peer %s (%s) changed name\n", peer->nick, peer->sid);
+			}
+
+			if (addrFound) {
+				peer->addr4 = addr;
+				printf("Peer %s (%s) changed IP to %s\n", peer->nick, peer->sid, inet_ntoa(addr));
+			}
+
+			if (cidFound) {
+				memcpy(peer->cid, cid, HASH_LEN_B32);
+				printf("Peer %s (%s) changed CID\n", peer->nick, peer->sid);
+			}
+
+
+		}
 
 		if (nick != NULL) free(nick);
 
@@ -1486,6 +1528,33 @@ int process_i_message(context_t* ctx, char *message) {
 		}
 
 		printf("Peer %s disconnected\n", sid);
+
+	} else if ( strncmp(message, "INF", 3) == 0) {
+
+		strtok(message, " ");
+
+		char *nick = NULL;
+		char *desc = NULL;
+
+		char *tmp;
+
+		while (  ( tmp = strtok(NULL, " ")) != NULL) {
+
+			if ( strncmp(tmp, "NI", 2) == 0) {
+				nick = remove_escapes(tmp + 2);
+			} else if ( strncmp(tmp, "DE", 2) == 0) {
+				desc = remove_escapes(tmp + 2);
+			}
+
+		}
+
+
+		if ( nick != NULL && desc != NULL) {
+			printf("Hub %s - %s\n", nick, desc);
+		}
+
+		if (  nick != NULL) free(nick);
+		if (  desc != NULL) free(desc);
 
 	} else {
 		printf("Received I message: %s\n", message);
