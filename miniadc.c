@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <bzlib.h>
+#include <time.h>
 #include <limits.h>
 
 #define MAX_STR_LEN 1500
@@ -41,13 +42,14 @@ typedef struct _tth_t {
 } tth_t;
 
 typedef struct _file_t {
-	tth_t *root_tth;
-	tth_t *first_block_tth;
+	char root_tth[HASH_LEN];
 	char *name;
 	long size;
 	struct _file_t *next;
 	struct _dir_t* parent;
 	char *fullpath;
+	char *index_pos;
+	time_t last_change;
 } file_t;
 
 typedef struct _dir_t {
@@ -267,16 +269,31 @@ tth_t *create_subtree(char *buf, int block_size) {
 
 
 
-void compute_tth(file_t *file) {
+int compute_tth(file_t *file) {
+
+	FILE *index = fopen(file->index_pos, "r");
+
+	if ( index != NULL) {
+		time_t t;
+		if ( fread(&t, sizeof(time_t), 1, index) == 1) {
+			if ( t == file->last_change) {
+				if ( fread(file->root_tth, HASH_LEN, 1, index) == 1) {
+					fclose(index);
+					return 0;
+				}
+
+			}
+		}
+
+		fclose(index);
+	}
 
 	printf("Hashing file %s\n", file->fullpath);
 
 	FILE *f = fopen(file->fullpath, "r");
 
 	if (f == NULL) {
-		file->root_tth = NULL;
-		file->first_block_tth = NULL;
-		return;
+		return -1;
 	}	
 
 	int len;
@@ -344,8 +361,6 @@ void compute_tth(file_t *file) {
 
 	}
 
-	file->first_block_tth = first_tth;
-
 	tth_t *next_level = create_tth_level_from_level(first_tth);
 
 	while ( next_level->next_sibling != NULL) {
@@ -355,9 +370,33 @@ void compute_tth(file_t *file) {
 		next_level = new_first;
 	}
 
-	file->root_tth = next_level;
+	memcpy(file->root_tth, next_level->hash, HASH_LEN);
 
-	print_hash(file->root_tth);
+	destroy_tth_level(next_level);
+
+	/* save the tthl in the index file */
+
+	index = fopen(file->index_pos, "w");
+
+	if ( index == NULL) {
+		return -1;
+	}
+
+	fwrite(&(file->last_change), sizeof(time_t), 1, index);
+	fwrite(file->root_tth, HASH_LEN, 1, index);
+
+	tth_t* next_tth = first_tth;
+
+	while ( next_tth != NULL ) {
+		fwrite(next_tth->hash, HASH_LEN, 1, index);
+		next_tth = next_tth->next_sibling;
+	}
+
+	fclose(index);
+
+	destroy_tth_level(first_tth);
+
+	return 0;
 }
 
 char *strreplace(char *haystack, char *needle, char *replace) {
@@ -408,11 +447,9 @@ char *strreplace(char *haystack, char *needle, char *replace) {
 
 }
 
-
-file_t* index_file(char *path) {
+file_t* index_file(char *path, char* index_dir) {
 
 	file_t *f = (file_t *) malloc(sizeof(file_t));
-
 
 	char cp[strlen(path) + 1];
 
@@ -434,9 +471,15 @@ file_t* index_file(char *path) {
 	}
 
 	f->size = s.st_size;
-	compute_tth(f);
+	f->index_pos = 0;
+	f->last_change = s.st_mtim.tv_sec;
 
-	if ( f->root_tth == NULL) {
+
+	f->index_pos = (char *) malloc( strlen(index_dir) +  1 + strlen(name) + 1 );
+	sprintf(f->index_pos, "%s/%s", index_dir, name);
+
+	if ( compute_tth(f) < 0) {
+		free(f->index_pos);
 		free(f->name);
 		free(f->fullpath);
 		free(f);
@@ -447,7 +490,7 @@ file_t* index_file(char *path) {
 
 }
 
-dir_t* index_directory(char *path) {
+dir_t* index_directory(char *path, char* index_dir) {
 
 	dir_t *d = (dir_t*) malloc(sizeof(dir_t));
 	
@@ -472,6 +515,8 @@ dir_t* index_directory(char *path) {
 		return NULL;
 	}
 
+	mkdir(index_dir, S_IRUSR | S_IWUSR | S_IXUSR);
+
 	struct dirent *e;
 	
 	while ( (e = readdir(dir)) != NULL) {
@@ -492,7 +537,7 @@ dir_t* index_directory(char *path) {
 		
 		if ( S_ISREG(s.st_mode) ) {
 
-			file_t *f = index_file(fpath);
+			file_t *f = index_file(fpath, index_dir);
 			
 			if ( f != NULL) {
 				f->parent = d;
@@ -501,7 +546,11 @@ dir_t* index_directory(char *path) {
 			}
 		} else if ( S_ISDIR(s.st_mode) ) {
 
-			dir_t *subdir = index_directory(fpath);
+			char sub_index[strlen(index_dir) + 1 + strlen(e->d_name) + 1];
+
+			sprintf(sub_index, "%s/%s", index_dir, e->d_name);
+
+			dir_t *subdir = index_directory(fpath, sub_index);
 
 			if ( subdir != NULL) {
 				subdir->next = d->first_subdir;
@@ -887,7 +936,7 @@ char *create_file_list(file_t *f) {
 
 	char tth[HASH_LEN_B32 + 1];
 
-	b32_encode(f->root_tth->hash, HASH_LEN, tth, HASH_LEN_B32 + 1);
+	b32_encode(f->root_tth, HASH_LEN, tth, HASH_LEN_B32 + 1);
 
 	tth[HASH_LEN_B32 - 1] = 0;
 
@@ -1037,6 +1086,55 @@ file_t *find_file_with_hash(dir_t *dir, char* tth) {
 
 }
 
+tth_t *load_tthl(file_t *file) {
+
+
+	FILE *index = fopen(file->index_pos, "r");
+
+	if ( index == NULL) {
+		return NULL;
+	}
+
+	time_t t;
+
+	if ( fread(&t, sizeof(time_t), 1, index) != 1) {
+		fclose(index);
+		return NULL;
+	}
+
+	char root_hash[HASH_LEN];
+
+	if ( fread(&root_hash, HASH_LEN, 1, index) != 1) {
+		fclose(index);
+		return NULL;
+	}
+
+	tth_t *first = NULL;
+	tth_t *last = NULL;
+
+	char hash[HASH_LEN];
+
+	while ( (fread(hash, HASH_LEN, 1, index ) == 1)) {
+
+		tth_t *next = (tth_t *) malloc(sizeof(tth_t));
+
+		memcpy(next->hash, hash, HASH_LEN);
+		next->next_sibling = NULL;
+
+		if ( first == NULL) {
+			first = next;
+		} else {
+			last->next_sibling = next;
+		}
+
+		last = next;
+
+	}
+
+	return first;
+
+}
+
 int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long bytes) {
 
 	if ( strlen(file_hash) != 4 + HASH_LEN_B32 - 1) {
@@ -1059,7 +1157,7 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long 
 	}
 
 	// find the first leaf tth
-	tth_t *ptth = file->first_block_tth;
+	tth_t *ptth = load_tthl(file);
 
 	// count the number of leaves
 	int leaf_count = 1;
@@ -1102,6 +1200,8 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long 
 	} while (ptth != NULL);
 
 	printf("Sent %ld bytes\n", sent);
+
+	destroy_tth_level(ptth);
 
 	return 0;
 
@@ -1792,13 +1892,9 @@ int main (int argc, char** argv ) {
 
 	context_t ctx;
 
-	printf("Loading index...\n");
-
-
-
 	printf("Indexing files...\n");
 
-	ctx.root_dir = index_directory(root);
+	ctx.root_dir = index_directory(root, index);
 
 	if ( ctx.root_dir == NULL) {
 		printf("Unable to index shared directory\n");
