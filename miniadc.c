@@ -6,6 +6,7 @@
  *
  */
 
+#include <assert.h>
 
 #include <sys/socket.h>
 #include <gnutls/gnutls.h>
@@ -36,14 +37,12 @@
 
 typedef struct _tth_t {
 	char hash[HASH_LEN];
-	struct _tth_t *left;
-	struct _tth_t *right;
 	struct _tth_t *next_sibling;
-	struct _tth_t *previous_sibling;
 } tth_t;
 
 typedef struct _file_t {
-	tth_t *tth;
+	tth_t *root_tth;
+	tth_t *first_block_tth;
 	char *name;
 	long size;
 	struct _file_t *next;
@@ -122,12 +121,20 @@ peer_t *create_peer(char *sid, char* cid, char* nick, struct in_addr* addr4) {
 
 }
 
+void print_hash(tth_t *tth) {
+
+	char h[HASH_LEN_B32 + 1];
+
+	b32_encode(tth->hash, HASH_LEN, h, HASH_LEN_B32 + 1);
+
+	printf("%s\n", h);
+}
+
 tth_t *create_tth(char *data, int len) {
 
 	tth_t *tth = (tth_t *) malloc(sizeof(tth_t));
 
-	tth->left = NULL;
-	tth->right = NULL;
+	tth->next_sibling = NULL;
 
 	char data2[len + 1];
 
@@ -145,8 +152,7 @@ tth_t *merge_tth(tth_t *left, tth_t *right) {
 
 	tth_t* tth = (tth_t *) malloc(sizeof(tth_t));
 
-	tth->left = left;
-	tth->right = right;
+	tth->next_sibling = NULL;
 
 	char data[HASH_LEN * 2 + 1];
 
@@ -160,72 +166,198 @@ tth_t *merge_tth(tth_t *left, tth_t *right) {
 
 }
 
-tth_t *compute_tth(char *path) {
+tth_t *create_tth_level_from_level(tth_t *first_lower_layer) {
 
-	FILE *f = fopen(path, "r");
+	tth_t *first_new_layer = NULL;
+	tth_t *last_new_layer = NULL;
+
+	tth_t *next_lower_layer = first_lower_layer;
+
+	while ( next_lower_layer != NULL && next_lower_layer->next_sibling != NULL ) {
+
+		tth_t *next_tth = merge_tth(next_lower_layer, next_lower_layer->next_sibling);
+
+		if ( first_new_layer == NULL) {
+			first_new_layer = next_tth;
+		} else {
+			last_new_layer->next_sibling = next_tth;
+		}
+
+		last_new_layer = next_tth;
+
+		next_lower_layer = next_lower_layer->next_sibling->next_sibling;
+
+	}
+
+	/* copy the spare leaf to the current level */
+	if ( next_lower_layer != NULL) {
+		tth_t* new_tth = (tth_t*) malloc( sizeof(tth_t));
+		new_tth->next_sibling = NULL;
+		memcpy(new_tth->hash, next_lower_layer->hash, HASH_LEN);
+
+		if (first_new_layer == NULL) {
+			first_new_layer = new_tth;
+		} else {
+			last_new_layer->next_sibling = new_tth;
+		}
+	}
+
+	return first_new_layer;
+
+}
+
+void destroy_tth_level(tth_t *first) {
+
+	while ( first != NULL ) {
+		tth_t *temp = first;
+		first = temp->next_sibling;
+		free(temp);
+	}
+
+}
+
+tth_t *create_tth_level_from_buffer(char *buf, int block_size) {
+
+	tth_t *first_tth = NULL;
+	tth_t *last_tth = NULL;
+
+	int remaining = block_size;
+	char *next_block = buf;
+
+	while (remaining > 0 || first_tth == NULL) {
+
+		int len = 1024;
+
+		if ( remaining < 1024) {
+			len = remaining;
+		}
+
+		tth_t *next_tth = create_tth(next_block, len);
+
+		if (last_tth != NULL) {
+			last_tth->next_sibling = next_tth;
+		} else {
+			first_tth = next_tth;
+		}
+
+		last_tth = next_tth;
+
+		next_block = next_block + len;
+		remaining -= len;
+	}
+
+	return first_tth;
+
+}
+
+tth_t *create_subtree(char *buf, int block_size) {
+
+	tth_t *first = create_tth_level_from_buffer(buf, block_size);
+
+	while ( first->next_sibling != NULL) {
+
+		tth_t *new_first = create_tth_level_from_level(first);
+		destroy_tth_level(first);
+		first = new_first;
+	}
+
+	return first;
+
+}
+
+
+
+void compute_tth(file_t *file) {
+
+	printf("Hashing file %s\n", file->fullpath);
+
+	FILE *f = fopen(file->fullpath, "r");
 
 	if (f == NULL) {
-		return NULL;
+		file->root_tth = NULL;
+		file->first_block_tth = NULL;
+		return;
 	}	
 
-	char buf[1024];
 	int len;
 
-	tth_t *first_tth = NULL;	
+	long total_block = (file->size + 1023l) / 1024l;
+
+	// a zero length file has one block
+	if ( total_block == 0) {
+		total_block = 1;
+	}
+
+	/* compute the number of levels */
+	int total_levels = 1;
+	while ( total_block > ( 1 << ( total_levels - 1))) {
+		total_levels++;
+	}
+
+	/* compute the block size */
+	int levels_to_compress = total_levels - 7;
+	if ( levels_to_compress > 0) {
+
+		/* we can compress at most 6 levels to obtain hashes of 64KiB */
+		if ( levels_to_compress > 6) {
+			levels_to_compress = 6;
+		}
+	} else {
+		levels_to_compress = 0;
+	}
+
+	int block_size = (1 << levels_to_compress) * 1024;
+
+	printf("Total levels: %d Levels to compress: %d Block size: %d\n", total_levels, levels_to_compress, block_size);
+
+	tth_t *first_tth = NULL;
 	tth_t *last_tth = NULL;
+
+	char buf[block_size];
+	char *ptr;
 
 	while (1) {
 
-		len = fread(buf, 1, 1024, f);
+		int read = 0;
+		ptr = buf;
 
-		if ( len == 0 && last_tth != NULL) {
+		do {
+			len = fread(ptr, 1, block_size - read, f);
+			read += len;
+			ptr += len;
+		} while ( read < block_size && len != 0);
+
+		// we are at the end of the file and at least one leaf exists
+		if ( read == 0 && last_tth != NULL) {
 			break;
 		}
 
-		tth_t *next_tth = create_tth(buf, len);
+		tth_t *next_tth = create_subtree(buf, read);
 
 		if (last_tth != NULL) {
-			last_tth->next_sibling =  next_tth;
-			next_tth->previous_sibling = last_tth;
+			last_tth->next_sibling = next_tth;
 		} else {
 			first_tth = next_tth;
-			next_tth->previous_sibling = NULL;
 		}
 
 		last_tth = next_tth;
 
 	}
 
-	while ( first_tth->next_sibling != NULL) {
+	file->first_block_tth = first_tth;
 
-		tth_t *t1 = NULL;
-		tth_t *t2 = NULL;
-		
-		do {
+	tth_t *next_level = create_tth_level_from_level(first_tth);
 
-			tth_t *next_tth = merge_tth(first_tth, first_tth->next_sibling);
+	while ( next_level->next_sibling != NULL) {
 
-			first_tth = first_tth->next_sibling->next_sibling;
-
-			if ( t2 == NULL) {
-				t1 = next_tth;				
-			} else {
-				t2->next_sibling = next_tth;
-			}
-
-			t2 = next_tth; 
-
-		} while ( first_tth != NULL && first_tth->next_sibling != NULL);
-
-		if ( first_tth != NULL) {
-			t2->next_sibling = first_tth;
-		}
-
-		first_tth = t1;
+		tth_t *new_first = create_tth_level_from_level(next_level);
+		destroy_tth_level(next_level);
+		next_level = new_first;
 	}
 
-	return first_tth;
+	file->root_tth = next_level;
 
+	print_hash(file->root_tth);
 }
 
 char *strreplace(char *haystack, char *needle, char *replace) {
@@ -302,9 +434,11 @@ file_t* index_file(char *path) {
 	}
 
 	f->size = s.st_size;
-	f->tth = compute_tth(path);			
+	compute_tth(f);
 
-	if ( f->tth == NULL) {
+	if ( f->root_tth == NULL) {
+		free(f->name);
+		free(f->fullpath);
 		free(f);
 		return NULL;
 	}
@@ -753,7 +887,7 @@ char *create_file_list(file_t *f) {
 
 	char tth[HASH_LEN_B32 + 1];
 
-	b32_encode(f->tth->hash, HASH_LEN, tth, HASH_LEN_B32 + 1);
+	b32_encode(f->root_tth->hash, HASH_LEN, tth, HASH_LEN_B32 + 1);
 
 	tth[HASH_LEN_B32 - 1] = 0;
 
@@ -881,7 +1015,7 @@ file_t *find_file_with_hash(dir_t *dir, char* tth) {
 	file_t *file = dir->first_file;
 
 	while (file != NULL) {
-		if ( memcmp(file->tth, tth, HASH_LEN) == 0) {
+		if ( memcmp(file->root_tth, tth, HASH_LEN) == 0) {
 			return file;
 		}
 		file = file->next;
@@ -919,14 +1053,26 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long 
 	file_t *file = find_file_with_hash(ctx->root_dir, tth);
 
 	if  (file ==  NULL) {
+		send_message_to_client(fd, "CSTA 151 file\\snot\\savailable\n");
 		printf("File not found\n");
 		return -1;
+	}
+
+	// find the first leaf tth
+	tth_t *ptth = file->first_block_tth;
+
+	// count the number of leaves
+	int leaf_count = 1;
+	tth_t *next_ptth = ptth;
+	while ( next_ptth->next_sibling != NULL) {
+		leaf_count ++;
+		next_ptth = next_ptth->next_sibling;
 	}
 
 	long out_len;
 
 	if ( bytes == -1) {
-		out_len = ((file->size + 1023) / 1024) * HASH_LEN;
+		out_len = leaf_count * HASH_LEN;
 	} else {
 		out_len = bytes;
 	}
@@ -938,10 +1084,6 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long 
 	sprintf(message, format, file_hash, start_pos, out_len);
 
 	send_message_to_client(fd, message);
-
-	// find the first leaf tth
-	tth_t *ptth = file->tth;
-	while ( ptth->left!= NULL) ptth = ptth->left;
 
 	long sent = 0;
 	long offset = 0;
@@ -1631,9 +1773,9 @@ int send_message( context_t* ctx, char* message ) {
 
 int main (int argc, char** argv ) {
 
-	if ( argc != 6) {
+	if ( argc != 7) {
 
-		printf("usage: miniadc hub port nick password root\n");
+		printf("usage: miniadc hub port nick password root index\n");
 		exit(1);
 	}
 
@@ -1646,8 +1788,13 @@ int main (int argc, char** argv ) {
 	char *nickname = argv[3];
 	char *password = argv[4];
 	char *root = argv[5];
+	char *index = argv[6];
 
 	context_t ctx;
+
+	printf("Loading index...\n");
+
+
 
 	printf("Indexing files...\n");
 
