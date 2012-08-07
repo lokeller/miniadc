@@ -24,11 +24,15 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <bzlib.h>
+#include <limits.h>
 
 #define MAX_STR_LEN 1500
 #define HASH_LEN 24
 #define HASH_LEN_B32 40
 #define SID_LEN 5
+
+#define CHARS_FOR_LONG (CHAR_BIT * sizeof(long) / 3) + 2
+#define CHARS_FOR_INT (CHAR_BIT * sizeof(int) / 3) + 2
 
 typedef struct _tth_t {
 	char hash[HASH_LEN];
@@ -41,7 +45,7 @@ typedef struct _tth_t {
 typedef struct _file_t {
 	tth_t *tth;
 	char *name;
-	int size;
+	long size;
 	struct _file_t *next;
 	struct _dir_t* parent;
 	char *fullpath;
@@ -224,6 +228,54 @@ tth_t *compute_tth(char *path) {
 
 }
 
+char *strreplace(char *haystack, char *needle, char *replace) {
+
+	char *output = (char *) malloc(1);
+	output[0] = 0;
+	int output_len = 0;
+
+	int replace_len = strlen(replace);
+	int needle_len = strlen(needle);
+
+	char *after_last_needle = haystack;
+	char *beginning_of_next_needle;
+
+	while ( (beginning_of_next_needle = strstr(after_last_needle, needle)) != NULL ) {
+
+		int token_len = beginning_of_next_needle - after_last_needle;
+
+		char *new_output = (char*) malloc(output_len + token_len + replace_len + 1);
+
+		memcpy(new_output, output, output_len);
+		memcpy(new_output + output_len, after_last_needle, token_len);
+		memcpy(new_output + output_len + token_len, replace, replace_len);
+		new_output[output_len + token_len + replace_len] = 0;
+
+		free(output);
+		output = new_output;
+
+		after_last_needle = beginning_of_next_needle + needle_len;
+		output_len = output_len + token_len + replace_len;
+
+	}
+
+	if ( after_last_needle != NULL) {
+
+		int token_len = strlen(after_last_needle);
+		char *new_output = (char*) malloc(output_len + token_len + 1);
+
+		memcpy(new_output, output, output_len);
+		memcpy(new_output + output_len, after_last_needle, token_len);
+		new_output[output_len + token_len] = 0;
+
+		free(output);
+		output = new_output;
+	}
+
+	return output;
+
+}
+
 
 file_t* index_file(char *path) {
 
@@ -334,23 +386,16 @@ dir_t* index_directory(char *path) {
 }
 
 
-void remove_escapes(char* str, char* out) {
+char *remove_escapes(char* str) {
 
-	char *pos_in = str;
-	char *pos_out = out;
+	char *pass1 = strreplace(str, "\\s", " ");
 
-	while ( *pos_in != 0 ) {
+	char *pass2 = strreplace(pass1, "\\n", "\n");
 
-		if ( *pos_in == '\\' && *(pos_in + 1) == 's' ) {
-			*pos_out = ' ';
-			pos_in++;
-		} else {
-			*pos_out = *pos_in;
-		}
-		pos_in++;
-		pos_out++;
-	}
-	*pos_out = 0;
+	free(pass1);
+
+	return pass2;
+
 }
 
 
@@ -692,12 +737,19 @@ char* append(char *one, char* other) {
 	return out;
 }
 
+char *escape_xml(char *name) {
+
+	char *pass1 = strreplace(name, "&", "&amp;");
+	char *pass2 = strreplace(pass1, "<", "&lt;");
+	free(pass1);
+
+	return pass2;
+}
+
 char *create_file_list(file_t *f) {
 
-	char *outer = "<File Name=\"%s\" Size=\"%d\" TTH=\"%s\" />\n";
+	char *outer = "<File Name=\"%s\" Size=\"%ld\" TTH=\"%s\" />\n";
 
-	//FIXME: how long is the digit?
-	char *out = (char *) malloc(strlen(outer) + strlen(f->name) + HASH_LEN_B32 + 20 + 1);
 
 	char tth[HASH_LEN_B32 + 1];
 
@@ -705,7 +757,13 @@ char *create_file_list(file_t *f) {
 
 	tth[HASH_LEN_B32 - 1] = 0;
 
-	sprintf(out, outer, f->name, f->size, tth);
+	char *name_xml = escape_xml(f->name);
+
+	char *out = (char *) malloc(strlen(outer) + strlen(name_xml) + HASH_LEN_B32 + CHARS_FOR_LONG + 1);
+
+	sprintf(out, outer, name_xml, f->size, tth);
+
+	free(name_xml);
 
 	return out;
 
@@ -749,9 +807,13 @@ char *create_dir_list(dir_t *dir) {
 		file = file->next;
 	}
 
-	char *out = (char *) malloc( strlen(outer) + strlen(body) + strlen(dir->name) + 1);
+	char *name_xml = escape_xml(dir->name);
 
-	sprintf(out, outer, dir->name, body);
+	char *out = (char *) malloc( strlen(outer) + strlen(body) + strlen(name_xml) + 1);
+
+	sprintf(out, outer, name_xml, body);
+
+	free(name_xml);
 
 	return out;
 
@@ -788,8 +850,7 @@ int send_files_list(context_t *ctx, int fd) {
 
 	char *format = "CSND file files.xml.bz2 0 %d\n";
 
-	//FIXME: put the real length
-	char message[strlen(format) + 10];
+	char message[strlen(format) + CHARS_FOR_INT + 1];
 
 	sprintf(message, format, out_len);
 
@@ -828,7 +889,7 @@ file_t *find_file_with_hash(dir_t *dir, char* tth) {
 
 }
 
-int send_tth_list(context_t* ctx, int fd, char* file_hash, int start_pos, int bytes) {
+int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long bytes) {
 
 	if ( strlen(file_hash) != 4 + HASH_LEN_B32 - 1) {
 		return -1;
@@ -848,7 +909,7 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, int start_pos, int by
 		return -1;
 	}
 
-	int out_len;
+	long out_len;
 
 	if ( bytes == -1) {
 		out_len = ((file->size + 1023) / 1024) * HASH_LEN;
@@ -856,22 +917,20 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, int start_pos, int by
 		out_len = bytes;
 	}
 
-	char *format = "CSND tthl %s %d %d\n";
+	char *format = "CSND tthl %s %ld %ld\n";
 
-	//FIXME: put the real length
-	char message[strlen(format) +  strlen(file_hash) +20];
+	char message[strlen(format) +  strlen(file_hash) + 2 * CHARS_FOR_LONG + 1];
 
 	sprintf(message, format, file_hash, start_pos, out_len);
 
 	send_message_to_client(fd, message);
-	printf("Sending %s", message);
 
 	// find the first leaf tth
 	tth_t *ptth = file->tth;
 	while ( ptth->left!= NULL) ptth = ptth->left;
 
-	int sent = 0;
-	int offset = 0;
+	long sent = 0;
+	long offset = 0;
 	do {
 		if (start_pos <= offset) {
 			send(fd, ptth->hash, HASH_LEN, 0);
@@ -886,7 +945,7 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, int start_pos, int by
 		ptth = ptth->next_sibling;
 	} while (ptth != NULL);
 
-	printf("Sent %d bytes\n", sent);
+	printf("Sent %ld bytes\n", sent);
 
 	return 0;
 
@@ -929,8 +988,7 @@ int send_file(context_t *ctx, int fd, char* file_name, long start_pos, long byte
 
 		char *format = "CSND file %s %ld %ld\n";
 
-		//FIXME: use real len
-		char message[strlen(format) + strlen(file_name) + 20 + 1];
+		char message[strlen(format) + strlen(file_name) + 2 * CHARS_FOR_LONG + 1];
 
 		sprintf(message, format, file_name, start_pos, bytes);
 
@@ -1303,10 +1361,11 @@ int process_i_message(context_t* ctx, char *message) {
 			return -1;
 		}
 			
-		char desc_d[MAX_STR_LEN];
+		char *desc_d = remove_escapes(desc);
 
-		remove_escapes(desc, desc_d);
 		printf("Hub says %d with message %s\n", code, desc_d);
+
+		free(desc_d);
 
 	} else if ( strncmp(message, "SUP", 3) == 0) {
 
@@ -1374,10 +1433,9 @@ int process_i_message(context_t* ctx, char *message) {
 					return -1;
 				}
 					
-				char desc_d[MAX_STR_LEN];
-
-				remove_escapes(desc, desc_d);
+				char *desc_d = remove_escapes(desc);
 				printf("Hub> %s\n", desc_d);
+				free(desc_d);
 			}
 
 		}
