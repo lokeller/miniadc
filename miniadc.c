@@ -27,6 +27,7 @@
 #include <bzlib.h>
 #include <time.h>
 #include <limits.h>
+#include <ctype.h>
 
 #define MAX_STR_LEN 1500
 #define HASH_LEN 24
@@ -84,6 +85,7 @@ typedef struct _context_t {
 	char* password;
 	dir_t *root_dir;
 	peer_t *first_peer;
+	char *root_path;
 } context_t;
 
 
@@ -121,15 +123,6 @@ peer_t *create_peer(char *sid, char* cid, char* nick, struct in_addr* addr4) {
 
 	return peer;
 
-}
-
-void print_hash(tth_t *tth) {
-
-	char h[HASH_LEN_B32 + 1];
-
-	b32_encode(tth->hash, HASH_LEN, h, HASH_LEN_B32 + 1);
-
-	printf("%s\n", h);
 }
 
 tth_t *create_tth(char *data, int len) {
@@ -325,8 +318,6 @@ int compute_tth(file_t *file) {
 
 	int block_size = (1 << levels_to_compress) * 1024;
 
-	printf("Total levels: %d Levels to compress: %d Block size: %d\n", total_levels, levels_to_compress, block_size);
-
 	tth_t *first_tth = NULL;
 	tth_t *last_tth = NULL;
 
@@ -360,6 +351,8 @@ int compute_tth(file_t *file) {
 		last_tth = next_tth;
 
 	}
+
+	fclose(f);
 
 	tth_t *next_level = create_tth_level_from_level(first_tth);
 
@@ -569,7 +562,7 @@ dir_t* index_directory(char *path, char* index_dir) {
 }
 
 
-char *remove_escapes(char* str) {
+char *remove_adc_escapes(char* str) {
 
 	char *pass1 = strreplace(str, "\\s", " ");
 
@@ -577,11 +570,35 @@ char *remove_escapes(char* str) {
 
 	free(pass1);
 
-	return pass2;
+	char *pass3 = strreplace(pass2, "\\\\", "\\");
+
+	free(pass2);
+
+	return pass3;
 
 }
 
+char *escape_adc(char *str) {
 
+	char *pass1 = strreplace(str, "\\", "\\\\");
+	char *pass2 = strreplace(pass1, "\n", "\\n");
+	char *pass3 = strreplace(pass2, " ", "\\s");
+
+	free(pass2);
+	free(pass1);
+
+	return pass3;
+}
+
+
+char *escape_xml(char *name) {
+
+	char *pass1 = strreplace(name, "&", "&amp;");
+	char *pass2 = strreplace(pass1, "<", "&lt;");
+	free(pass1);
+
+	return pass2;
+}
 
 int skip_unknown_message(context_t *ctx) {
 
@@ -792,9 +809,35 @@ int b32_encode(char *bin, int len, char* base32, int maxlen) {
 	return idx;
 }
 
+void decode_hash(char *b32_hash, char *dest) {
+
+	char b32[HASH_LEN_B32 + 1];
+
+	memcpy(b32, b32_hash, HASH_LEN_B32);
+	b32[HASH_LEN_B32 - 1] = '=';
+	b32[HASH_LEN_B32] = 0;
+
+	b32_decode(b32, dest, HASH_LEN);
+
+}
+
+char *b32_hash(char* hash) {
+	static char b32[HASH_LEN_B32 + 1];
+
+	b32_encode(hash, HASH_LEN, b32, HASH_LEN_B32 + 1);
+	b32[HASH_LEN_B32 - 1 ] = 0;
+
+	return b32;
+}
+
 void create_pid(char* b32_pid) {
 
-	char * data = "testeste";
+	char *format = "miniadc%dl";
+
+	char data[strlen(format) + CHARS_FOR_LONG + 1];
+
+	sprintf(data, format, time(NULL));
+
 	char pid[HASH_LEN];
 	
 	tiger((uint64_t *) data, sizeof(data), (uint64_t *) pid);
@@ -906,7 +949,6 @@ int send_message_to_client( int fd, char* message ) {
 			return -1;
 	}
 
-	printf("Sent: %s\n", message);
 	return 0;
 }
 
@@ -918,15 +960,6 @@ char* append(char *one, char* other) {
 	strcat(out, other);
 
 	return out;
-}
-
-char *escape_xml(char *name) {
-
-	char *pass1 = strreplace(name, "&", "&amp;");
-	char *pass2 = strreplace(pass1, "<", "&lt;");
-	free(pass1);
-
-	return pass2;
 }
 
 char *create_file_list(file_t *f) {
@@ -1021,10 +1054,14 @@ char *create_complete_list(context_t *ctx) {
 
 int send_files_list(context_t *ctx, int fd) {
 
+	printf("Creating file list...\n");
+
 	char *list = create_complete_list(ctx);
 
 	char *out = (char *) malloc(strlen(list));
 	unsigned int out_len = strlen(list);
+
+	printf("Compressing file list...\n");
 
 	if ( BZ2_bzBuffToBuffCompress(out, &out_len, list, strlen(list), 1, 0, 0) != BZ_OK ) {
 		printf("Error while compressing file list\n");
@@ -1037,9 +1074,13 @@ int send_files_list(context_t *ctx, int fd) {
 
 	sprintf(message, format, out_len);
 
+	printf("Sending file list...\n");
+
 	send_message_to_client(fd, message);
 
 	send(fd, out, out_len, 0);
+
+	printf("File list sent\n");
 
 	return 0;
 
@@ -1131,6 +1172,8 @@ tth_t *load_tthl(file_t *file) {
 
 	}
 
+	fclose(index);
+
 	return first;
 
 }
@@ -1183,23 +1226,19 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long 
 
 	send_message_to_client(fd, message);
 
-	long sent = 0;
 	long offset = 0;
+
 	do {
 		if (start_pos <= offset) {
 			send(fd, ptth->hash, HASH_LEN, 0);
-			sent += HASH_LEN;
 		} else {
 			if ( start_pos - HASH_LEN < offset) {
 				send(fd, ptth->hash + ( start_pos - offset ), HASH_LEN - ( start_pos - offset ), 0);
-				sent+= HASH_LEN - ( start_pos - offset );
 			}
 		}
 		offset += HASH_LEN;
 		ptth = ptth->next_sibling;
 	} while (ptth != NULL);
-
-	printf("Sent %ld bytes\n", sent);
 
 	destroy_tth_level(ptth);
 
@@ -1500,6 +1539,303 @@ int process_d_message(context_t* ctx, char *message) {
 	return 0;
 }
 
+enum { SEARCH_AN, SEARCH_NO, SEARCH_EX, SEARCH_TR };
+
+typedef struct _search_criteria_t {
+	char *value;
+	int type;
+	struct _search_criteria_t* next;
+} search_criteria_t;
+
+char* stristr(char *string1, char* string2) {
+
+	char string1u[strlen(string1) + 1];
+	char string2u[strlen(string2) + 1];
+
+	int i;
+
+	for (i = 0 ; i< strlen(string1) ; i++) {
+		string1u[i] = toupper(string1[i]);
+	}
+	string1u[i] = 0;
+
+	for (i = 0 ; i< strlen(string2) ; i++) {
+			string2u[i] = toupper(string2[i]);
+	}
+	string2u[i] = 0;
+
+	return strstr(string1u, string2u);
+
+}
+
+int stricmp(char *string1, char* string2) {
+
+	char string1u[strlen(string1) + 1];
+	char string2u[strlen(string2) + 1];
+
+	int i;
+
+	for (i = 0 ; i< strlen(string1) ; i++) {
+		string1u[i] = toupper(string1[i]);
+	}
+	string1u[i] = 0;
+
+	for (i = 0 ; i< strlen(string2) ; i++) {
+			string2u[i] = toupper(string2[i]);
+	}
+	string2u[i] = 0;
+
+	return strcmp(string1u, string2u);
+
+}
+
+void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_criteria, char* token, char* dest) {
+
+	char *format = "DRES %s %s SI%ld SL1 FN%s TO%s TR%s\n";
+
+	file_t *f = dir->first_file;
+
+	int offset = strlen(ctx->root_path);
+
+	while ( f != NULL ) {
+
+		char *virtual_path = f->fullpath + offset;
+
+		search_criteria_t *next_criteria = first_criteria;
+
+		int matches = 1;
+		int extension_match = 0;
+		int extension_present = 0;
+
+		char *extension = NULL;
+
+		while ( next_criteria != NULL && matches == 1) {
+
+			switch (next_criteria->type) {
+			case SEARCH_AN:
+
+				if ( stristr(f->name, next_criteria->value) == NULL) {
+					matches = 0;
+				}
+
+				break;
+
+			case SEARCH_EX:
+
+				if ( extension == NULL) {
+					extension = rindex(virtual_path, '.');
+					if ( extension == NULL) {
+						matches = 0;
+						break;
+					}
+					extension++;
+					extension_present = 1;
+				}
+
+				if ( stricmp(extension, next_criteria->value) == 0) {
+					extension_match = 1;
+				}
+
+				break;
+			case SEARCH_NO:
+
+				if ( stristr(f->name, next_criteria->value) != NULL) {
+					matches = 0;
+				}
+
+				break;
+			case SEARCH_TR:
+
+				if ( memcmp(f->root_tth, next_criteria->value, HASH_LEN) != 0) {
+					matches = 0;
+				}
+
+				break;
+			}
+
+			next_criteria = next_criteria->next;
+
+		}
+
+
+		if ( matches && ( !extension_present || extension_match)) {
+
+				char *virtual_path_escaped = escape_adc(virtual_path);
+
+				char result[strlen(format) + SID_LEN + SID_LEN + CHARS_FOR_LONG + strlen(virtual_path_escaped) + strlen(token) + HASH_LEN_B32 + 1];
+
+				sprintf(result, format, ctx->sid, dest, f->size, virtual_path_escaped, token, b32_hash(f->root_tth));
+
+				send_message(ctx, result);
+
+				free(virtual_path_escaped);
+
+		}
+
+		f = f->next;
+
+	}
+
+	dir_t *subdir = dir->first_subdir;
+
+	while(subdir != NULL) {
+
+		find_results_in_dir(ctx, subdir, first_criteria, token, dest);
+
+		subdir = subdir->next;
+
+	}
+
+
+
+}
+
+int process_sch_command(context_t* ctx, char *sid, char* command_args) {
+
+	search_criteria_t *first_criteria = NULL;
+	search_criteria_t *last_criteria = NULL;
+
+	char *to = NULL;
+
+	char *next_token = strtok(command_args, " ");
+
+	while (next_token != NULL) {
+
+		int token_len = strlen(next_token);
+
+		if (strncmp(next_token, "AN", 2) == 0 ||
+			strncmp(next_token, "NO", 2) == 0 ||
+			strncmp(next_token, "EX", 2) == 0 ||
+			strncmp(next_token, "TR", 2) == 0 )  {
+
+			search_criteria_t *next_criteria = (search_criteria_t *) malloc( sizeof(search_criteria_t));
+
+			if ( strncmp(next_token, "TR", 2) == 0 ) {
+				next_criteria->value = (char *) malloc(HASH_LEN);
+				decode_hash(next_token + 2, next_criteria->value);
+			} else {
+				next_criteria->value = (char *) malloc(strlen(next_token) - 2 + 1);
+				strcpy(next_criteria->value, next_token + 2);
+			}
+
+			if (strncmp(next_token, "AN", 2) == 0 ) {
+				next_criteria->type = SEARCH_AN;
+			} else if (strncmp(next_token, "NO", 2) == 0 ) {
+				next_criteria->type = SEARCH_NO;
+			} else if (strncmp(next_token, "EX", 2) == 0 ) {
+				next_criteria->type = SEARCH_EX;
+			} else if (strncmp(next_token, "TR", 2) == 0 ) {
+				next_criteria->type = SEARCH_TR;
+			}
+
+			next_criteria->next = NULL;
+
+			if ( first_criteria == NULL ) {
+				first_criteria = next_criteria;
+			} else {
+				last_criteria->next = next_criteria;
+			}
+
+			last_criteria = next_criteria;
+
+		} else if ( strncmp(next_token, "TO", 2) == 0) {
+			to = (char *) malloc(token_len - 1);
+			strcpy(to, next_token + 2);
+		}
+
+		next_token = strtok(NULL,  " ");
+	}
+
+	if ( first_criteria != NULL && to != NULL) {
+		find_results_in_dir(ctx, ctx->root_dir, first_criteria, to, sid);
+	}
+
+	while (first_criteria != NULL) {
+		search_criteria_t *s = first_criteria;
+		first_criteria = first_criteria->next;
+		free(s);
+	}
+
+	if ( to != NULL ) free(to) ;
+
+	return 0;
+}
+
+int process_inf_command(context_t* ctx, char* sid, char *message_args) {
+
+	// skip if this is me
+	if ( strcmp(sid, ctx->sid) == 0) return 0;
+
+	char *nick = NULL;
+	struct in_addr addr;
+	int addrFound = 0;
+	char cid[HASH_LEN_B32];
+	int cidFound = 0;
+
+	char *next = strtok(message_args, " ");
+
+	addr.s_addr = 0;
+	memset(cid, 0 , HASH_LEN_B32);
+
+	while ( next != NULL) {
+		if ( strncmp(next, "ID", 2) == 0) {
+			if (strlen(next + 2) != HASH_LEN_B32 - 1) {
+				continue;
+			}
+			memcpy(cid, next + 2, HASH_LEN_B32);
+			cidFound = 1;
+		} else if ( strncmp(next, "NI", 2) == 0) {
+			nick = (char *) malloc(strlen(next+2) + 1);
+			strcpy(nick, next+2);
+		} else if ( strncmp(next, "I4", 2) == 0) {
+
+			if ( inet_aton(next+2, &addr) == 0 ) {
+				printf("Error parsing address\n");
+			}
+			addrFound = 1;
+
+		}
+
+		next = strtok(NULL,  " ");
+	}
+
+	peer_t *peer = find_peer(ctx, sid);
+
+	if ( peer == NULL ) {
+
+		peer = create_peer(sid, cid, nick, &addr);
+		peer->next = ctx->first_peer;
+		ctx->first_peer = peer;
+
+		printf("Peer %s (%s) on ip %s available\n", peer->nick, peer->sid, inet_ntoa(addr));
+
+	} else {
+
+		if (nick != NULL) {
+			free(peer->nick);
+			peer->nick = (char *) malloc(strlen(nick) + 1);
+			strcpy(peer->nick, nick);
+			printf("Peer %s (%s) changed name\n", peer->nick, peer->sid);
+		}
+
+		if (addrFound) {
+			peer->addr4 = addr;
+			printf("Peer %s (%s) changed IP to %s\n", peer->nick, peer->sid, inet_ntoa(addr));
+		}
+
+		if (cidFound) {
+			memcpy(peer->cid, cid, HASH_LEN_B32);
+			printf("Peer %s (%s) changed CID\n", peer->nick, peer->sid);
+		}
+
+
+	}
+
+	if (nick != NULL) free(nick);
+
+	return 0;
+}
+
 int process_b_message(context_t* ctx, char *message) {
 
 	/* this message is not valid */
@@ -1507,124 +1843,65 @@ int process_b_message(context_t* ctx, char *message) {
 		return -1;
 	}
 
-	char command[4];
+	printf("%s\n", message);
 
-	char *tmp = strtok(message, " ");
-	if ( strlen(tmp) > 3) return -1;
-	strcpy(command, tmp);
+	char command[4];
+	memcpy(command, message, 3);
+	command[3] = 0;
 
 	char sid[SID_LEN];
-	tmp = strtok(NULL, " ");
-	if ( strlen(tmp) > SID_LEN - 1) return -1;
-	strcpy(sid, tmp);
+	memcpy(sid, message + 4, SID_LEN - 1);
+	sid[SID_LEN - 1] = 0;
+
+	char *message_args = message + 4 + SID_LEN;
 
 	if ( strcmp(command, "SCH") == 0) {
 
-		char *an = NULL;
-		char *to = NULL;
-		
-		char *next = strtok(NULL, " ");
-
-		while (next != NULL) {
-
-			int token_len = strlen(next);
-
-			if (strncmp(next, "AN", 2) == 0 )  {
-				an = (char *) malloc(token_len - 1);
-				strcpy(an, next + 2);
-			} else if ( strncmp(next, "TO", 2) == 0) {
-				to = (char *) malloc(token_len - 1);
-				strcpy(to, next + 2);
-			}
-
-			next = strtok(NULL,  " ");
-		}
-
-		if ( an != NULL && to != NULL) {
-			char result[MAX_STR_LEN];
-
-			sprintf(result, "DRES %s %s SI300 SL1 FN/path/to/file/%s TO%s TR%s\n", ctx->sid, sid, an, to, ctx->cid);
-
-			send_message(ctx, result);
-		}
-
-		if ( an != NULL ) free(an) ;
-		if ( to != NULL ) free(to) ;
+		return process_sch_command(ctx, sid, message_args);
 
 	} else if ( strcmp(command, "INF") == 0 ) {
 
-		// skip if this is me
-		if ( strcmp(sid, ctx->sid) == 0) return 0;
-
-		char *nick = NULL;
-		struct in_addr addr;
-		int addrFound = 0;
-		char cid[HASH_LEN_B32];
-		int cidFound = 0;
-
-		char *next = strtok(NULL, " ");
-
-		addr.s_addr = 0;
-		memset(cid, 0 , HASH_LEN_B32);
-
-		while ( next != NULL) {
-			if ( strncmp(next, "ID", 2) == 0) {
-				if (strlen(next + 2) != HASH_LEN_B32 - 1) {
-					continue;
-				}
-				memcpy(cid, next + 2, HASH_LEN_B32);
-				cidFound = 1;
-			} else if ( strncmp(next, "NI", 2) == 0) {
-				nick = (char *) malloc(strlen(next+2) + 1);
-				strcpy(nick, next+2);
-			} else if ( strncmp(next, "I4", 2) == 0) {
-
-				if ( inet_aton(next+2, &addr) == 0 ) {
-					printf("Error parsing address\n");
-				}
-				addrFound = 1;
-
-			}
-
-			next = strtok(NULL,  " ");
-		}
-
-		peer_t *peer = find_peer(ctx, sid);
-
-		if ( peer == NULL ) {
-
-			peer = create_peer(sid, cid, nick, &addr);
-			peer->next = ctx->first_peer;
-			ctx->first_peer = peer;
-
-			printf("Peer %s (%s) on ip %s available\n", peer->nick, peer->sid, inet_ntoa(addr));
-
-		} else {
-
-			if (nick != NULL) {
-				free(peer->nick);
-				peer->nick = (char *) malloc(strlen(nick) + 1);
-				strcpy(peer->nick, nick);
-				printf("Peer %s (%s) changed name\n", peer->nick, peer->sid);
-			}
-
-			if (addrFound) {
-				peer->addr4 = addr;
-				printf("Peer %s (%s) changed IP to %s\n", peer->nick, peer->sid, inet_ntoa(addr));
-			}
-
-			if (cidFound) {
-				memcpy(peer->cid, cid, HASH_LEN_B32);
-				printf("Peer %s (%s) changed CID\n", peer->nick, peer->sid);
-			}
-
-
-		}
-
-		if (nick != NULL) free(nick);
+		return process_inf_command(ctx, sid, message_args);
 
 	} else {
 		printf("Received B message %s\n", message);
+	}
+
+	return 0;
+}
+
+int process_f_message(context_t* ctx, char *message) {
+
+	/* this message is not valid */
+	if ( strlen(message) < 5 ) {
+		return -1;
+	}
+
+	printf("%s\n", message);
+
+	char command[4];
+	memcpy(command, message, 3);
+	command[3] = 0;
+
+	char sid[SID_LEN];
+	memcpy(sid, message + 4, SID_LEN - 1);
+	sid[SID_LEN - 1] = 0;
+
+	char *message_args = message + 4 + SID_LEN;
+
+	while (message_args[0] == '-' ||
+			message_args[0] == '+') {
+
+		message_args = index(message_args, ' ') + 1;
+
+	}
+
+	if ( strcmp(command, "SCH") == 0) {
+
+		return process_sch_command(ctx, sid, message_args);
+
+	} else {
+		printf("Received F message %s\n", message);
 	}
 
 	return 0;
@@ -1645,7 +1922,7 @@ int process_i_message(context_t* ctx, char *message) {
 			return -1;
 		}
 			
-		char *desc_d = remove_escapes(desc);
+		char *desc_d = remove_adc_escapes(desc);
 
 		printf("Hub says %d with message %s\n", code, desc_d);
 
@@ -1717,7 +1994,7 @@ int process_i_message(context_t* ctx, char *message) {
 					return -1;
 				}
 					
-				char *desc_d = remove_escapes(desc);
+				char *desc_d = remove_adc_escapes(desc);
 				printf("Hub> %s\n", desc_d);
 				free(desc_d);
 			}
@@ -1783,9 +2060,9 @@ int process_i_message(context_t* ctx, char *message) {
 		while (  ( tmp = strtok(NULL, " ")) != NULL) {
 
 			if ( strncmp(tmp, "NI", 2) == 0) {
-				nick = remove_escapes(tmp + 2);
+				nick = remove_adc_escapes(tmp + 2);
 			} else if ( strncmp(tmp, "DE", 2) == 0) {
-				desc = remove_escapes(tmp + 2);
+				desc = remove_adc_escapes(tmp + 2);
 			}
 
 		}
@@ -1806,7 +2083,7 @@ int process_i_message(context_t* ctx, char *message) {
 
 }
 
-int process_command( context_t *ctx ) {
+int process_message_from_hub( context_t *ctx ) {
 
 
 	char message[MAX_STR_LEN];
@@ -1833,6 +2110,8 @@ int process_command( context_t *ctx ) {
 	char type = message[0];
 
 
+	printf("Received: %s\n", message);
+
 	/* check the type of message */
 	switch (type) {
 		case 'I':
@@ -1843,6 +2122,9 @@ int process_command( context_t *ctx ) {
 			break;
 		case 'D':
 			process_d_message(ctx, message + 1);
+			break;
+		case 'F':
+			process_f_message(ctx, message + 1);
 			break;
 		default:
 			printf("Received: %s\n", message);
@@ -1894,6 +2176,7 @@ int main (int argc, char** argv ) {
 
 	printf("Indexing files...\n");
 
+	ctx.root_path = root;
 	ctx.root_dir = index_directory(root, index);
 
 	if ( ctx.root_dir == NULL) {
@@ -1972,7 +2255,7 @@ int main (int argc, char** argv ) {
 	send_message(&ctx, "HSUP ADBASE ADTIGR\n");
 
 	while ( 1 ) {
-		ret = process_command(&ctx);
+		ret = process_message_from_hub(&ctx);
 
 		if (ret < 0) {
 			printf("Disconnected\n");
