@@ -59,6 +59,7 @@ typedef struct _dir_t {
 	file_t *first_file;
 	struct _dir_t *first_subdir;
 	struct _dir_t *next;
+	char *fullpath;
 } dir_t;
 
 typedef struct _peer_t {
@@ -498,6 +499,7 @@ dir_t* index_directory(char *path, char* index_dir) {
 	d->first_file = NULL;
 	d->first_subdir = NULL;
 	d->next = NULL;
+	d->fullpath = strdup(path);
 
 	DIR* dir = opendir(path);
 
@@ -1589,7 +1591,29 @@ int stricmp(char *string1, char* string2) {
 
 }
 
-void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_criteria, char* token, char* dest) {
+long compute_directory_size(dir_t *dir) {
+
+	long size = 0;
+
+	file_t *f = dir->first_file;
+
+	while (f != NULL) {
+		size += f->size;
+		f = f->next;
+	}
+
+	dir_t *d = dir->first_subdir;
+
+	while (d != NULL) {
+		size += compute_directory_size(d);
+		d = d->next;
+	}
+
+	return size;
+
+}
+
+void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_criteria, char* token, char* dest, int type) {
 
 	char *format = "DRES %s %s SI%ld SL1 FN%s TO%s TR%s\n";
 
@@ -1597,59 +1621,36 @@ void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_cr
 
 	int offset = strlen(ctx->root_path);
 
-	while ( f != NULL ) {
+	if ( type == 0 || type == 2) {
 
-		char *virtual_path = f->fullpath + offset;
+		char *virtual_path = dir->fullpath + offset;
 
 		search_criteria_t *next_criteria = first_criteria;
 
 		int matches = 1;
-		int extension_match = 0;
-		int extension_present = 0;
-
-		char *extension = NULL;
 
 		while ( next_criteria != NULL && matches == 1) {
 
 			switch (next_criteria->type) {
 			case SEARCH_AN:
 
-				if ( stristr(f->name, next_criteria->value) == NULL) {
+				if ( stristr(dir->name, next_criteria->value) == NULL) {
+					matches = 0;
+				}
+				break;
+
+			case SEARCH_NO:
+
+				if ( stristr(dir->name, next_criteria->value) != NULL) {
 					matches = 0;
 				}
 
 				break;
 
 			case SEARCH_EX:
-
-				if ( extension == NULL) {
-					extension = rindex(virtual_path, '.');
-					if ( extension == NULL) {
-						matches = 0;
-						break;
-					}
-					extension++;
-					extension_present = 1;
-				}
-
-				if ( stricmp(extension, next_criteria->value) == 0) {
-					extension_match = 1;
-				}
-
-				break;
-			case SEARCH_NO:
-
-				if ( stristr(f->name, next_criteria->value) != NULL) {
-					matches = 0;
-				}
-
-				break;
 			case SEARCH_TR:
 
-				if ( memcmp(f->root_tth, next_criteria->value, HASH_LEN) != 0) {
-					matches = 0;
-				}
-
+				matches = 0;
 				break;
 			}
 
@@ -1658,29 +1659,113 @@ void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_cr
 		}
 
 
-		if ( matches && ( !extension_present || extension_match)) {
+		if ( matches ) {
 
 				char *virtual_path_escaped = escape_adc(virtual_path);
 
-				char result[strlen(format) + SID_LEN + SID_LEN + CHARS_FOR_LONG + strlen(virtual_path_escaped) + strlen(token) + HASH_LEN_B32 + 1];
+				char *formatDir = "DRES %s %s SL1 FN%s/ TO%s TY2 SI%ld\n";
 
-				sprintf(result, format, ctx->sid, dest, f->size, virtual_path_escaped, token, b32_hash(f->root_tth));
+				char result[strlen(formatDir) + SID_LEN + SID_LEN + strlen(virtual_path_escaped) + strlen(token) + CHARS_FOR_LONG + 1];
+
+				sprintf(result, formatDir, ctx->sid, dest, virtual_path_escaped, token, compute_directory_size(dir));
 
 				send_message(ctx, result);
 
 				free(virtual_path_escaped);
 
+				printf("%s\n", result);
+
 		}
 
-		f = f->next;
+	}
 
+
+	if ( type == 0 || type == 1) {
+		while ( f != NULL ) {
+
+			char *virtual_path = f->fullpath + offset;
+
+			search_criteria_t *next_criteria = first_criteria;
+
+			int matches = 1;
+			int extension_match = 0;
+			int extension_present = 0;
+
+			char *extension = NULL;
+
+			while ( next_criteria != NULL && matches == 1) {
+
+				switch (next_criteria->type) {
+				case SEARCH_AN:
+
+					if ( stristr(f->name, next_criteria->value) == NULL) {
+						matches = 0;
+					}
+
+					break;
+
+				case SEARCH_EX:
+
+					if ( extension == NULL) {
+						extension = rindex(virtual_path, '.');
+						if ( extension == NULL) {
+							matches = 0;
+							break;
+						}
+						extension++;
+						extension_present = 1;
+					}
+
+					if ( stricmp(extension, next_criteria->value) == 0) {
+						extension_match = 1;
+					}
+
+					break;
+				case SEARCH_NO:
+
+					if ( stristr(f->name, next_criteria->value) != NULL) {
+						matches = 0;
+					}
+
+					break;
+				case SEARCH_TR:
+
+					if ( memcmp(f->root_tth, next_criteria->value, HASH_LEN) != 0) {
+						matches = 0;
+					}
+
+					break;
+				}
+
+				next_criteria = next_criteria->next;
+
+			}
+
+
+			if ( matches && ( !extension_present || extension_match)) {
+
+					char *virtual_path_escaped = escape_adc(virtual_path);
+
+					char result[strlen(format) + SID_LEN + SID_LEN + CHARS_FOR_LONG + strlen(virtual_path_escaped) + strlen(token) + HASH_LEN_B32 + 1];
+
+					sprintf(result, format, ctx->sid, dest, f->size, virtual_path_escaped, token, b32_hash(f->root_tth));
+
+					send_message(ctx, result);
+
+					free(virtual_path_escaped);
+
+			}
+
+			f = f->next;
+
+		}
 	}
 
 	dir_t *subdir = dir->first_subdir;
 
 	while(subdir != NULL) {
 
-		find_results_in_dir(ctx, subdir, first_criteria, token, dest);
+		find_results_in_dir(ctx, subdir, first_criteria, token, dest, type);
 
 		subdir = subdir->next;
 
@@ -1690,12 +1775,15 @@ void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_cr
 
 }
 
+
+
 int process_sch_command(context_t* ctx, char *sid, char* command_args) {
 
 	search_criteria_t *first_criteria = NULL;
 	search_criteria_t *last_criteria = NULL;
 
 	char *to = NULL;
+	int type = 0;
 
 	char *next_token = strtok(command_args, " ");
 
@@ -1741,13 +1829,15 @@ int process_sch_command(context_t* ctx, char *sid, char* command_args) {
 		} else if ( strncmp(next_token, "TO", 2) == 0) {
 			to = (char *) malloc(token_len - 1);
 			strcpy(to, next_token + 2);
+		} else if ( strncmp(next_token, "TY", 2) == 0) {
+			type = atoi(next_token+2);
 		}
 
 		next_token = strtok(NULL,  " ");
 	}
 
 	if ( first_criteria != NULL && to != NULL) {
-		find_results_in_dir(ctx, ctx->root_dir, first_criteria, to, sid);
+		find_results_in_dir(ctx, ctx->root_dir, first_criteria, to, sid, type);
 	}
 
 	while (first_criteria != NULL) {
@@ -1972,7 +2062,8 @@ int process_i_message(context_t* ctx, char *message) {
 		}
 
 		char response[MAX_STR_LEN];
-		sprintf(response, "BINF %s VE0.0.1 NI%s DEminiadcs\\sclient PD%s ID%s SUADCS\n", ctx->sid, ctx->nickname, ctx->pid, ctx->cid);
+		//FIXME: we don't enforce the slots
+		sprintf(response, "BINF %s VE0.0.1 NI%s DEminiadcs\\sclient SL4 PD%s ID%s SUADCS\n", ctx->sid, ctx->nickname, ctx->pid, ctx->cid);
 
 		send_message(ctx, response);
 
