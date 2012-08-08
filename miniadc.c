@@ -87,6 +87,8 @@ typedef struct _context_t {
 	dir_t *root_dir;
 	peer_t *first_peer;
 	char *root_path;
+	char *index;
+	unsigned int index_len;
 } context_t;
 
 
@@ -1056,33 +1058,20 @@ char *create_complete_list(context_t *ctx) {
 
 int send_files_list(context_t *ctx, int fd) {
 
-	printf("Creating file list...\n");
-
-	char *list = create_complete_list(ctx);
-
-	char *out = (char *) malloc(strlen(list));
-	unsigned int out_len = strlen(list);
-
-	printf("Compressing file list...\n");
-
-	if ( BZ2_bzBuffToBuffCompress(out, &out_len, list, strlen(list), 1, 0, 0) != BZ_OK ) {
-		printf("Error while compressing file list\n");
-		return -1;
-	}
-
 	char *format = "CSND file files.xml.bz2 0 %d\n";
 
 	char message[strlen(format) + CHARS_FOR_INT + 1];
 
-	sprintf(message, format, out_len);
+	sprintf(message, format, ctx->index_len);
 
 	printf("Sending file list...\n");
 
 	send_message_to_client(fd, message);
 
-	send(fd, out, out_len, 0);
+	send(fd, ctx->index, ctx->index_len, 0);
 
 	printf("File list sent\n");
+
 
 	return 0;
 
@@ -1864,19 +1853,15 @@ int process_inf_command(context_t* ctx, char* sid, char *message_args) {
 
 	char *next = strtok(message_args, " ");
 
-	addr.s_addr = 0;
-	memset(cid, 0 , HASH_LEN_B32);
-
 	while ( next != NULL) {
 		if ( strncmp(next, "ID", 2) == 0) {
 			if (strlen(next + 2) != HASH_LEN_B32 - 1) {
 				continue;
 			}
-			memcpy(cid, next + 2, HASH_LEN_B32);
+			strcpy(cid, next + 2);
 			cidFound = 1;
 		} else if ( strncmp(next, "NI", 2) == 0) {
-			nick = (char *) malloc(strlen(next+2) + 1);
-			strcpy(nick, next+2);
+			nick = strdup(next+2);
 		} else if ( strncmp(next, "I4", 2) == 0) {
 
 			if ( inet_aton(next+2, &addr) == 0 ) {
@@ -2244,6 +2229,25 @@ int send_message( context_t* ctx, char* message ) {
 	return 0;
 }
 
+int create_compressed_file_list(context_t *ctx) {
+	printf("Creating file list...\n");
+
+	char *list = create_complete_list(ctx);
+
+	ctx->index = (char *) malloc(strlen(list));
+	ctx->index_len = strlen(list);
+
+	printf("Compressing file list...\n");
+
+	if ( BZ2_bzBuffToBuffCompress(ctx->index, &(ctx->index_len), list, strlen(list), 1, 0, 0) != BZ_OK ) {
+		printf("Error while compressing file list\n");
+		return -1;
+	}
+
+	return 0;
+
+}
+
 int main (int argc, char** argv ) {
 
 	if ( argc != 7) {
@@ -2272,6 +2276,12 @@ int main (int argc, char** argv ) {
 
 	if ( ctx.root_dir == NULL) {
 		printf("Unable to index shared directory\n");
+		exit(1);
+	}
+
+	printf("Creating file list...");
+
+	if ( create_compressed_file_list(&ctx) != 0 ) {
 		exit(1);
 	}
 
@@ -2342,6 +2352,7 @@ int main (int argc, char** argv ) {
 
 	ctx.nickname = nickname;
 	ctx.password = password;
+	ctx.first_peer = NULL;
 
 	send_message(&ctx, "HSUP ADBASE ADTIGR\n");
 
