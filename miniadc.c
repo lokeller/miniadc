@@ -1520,7 +1520,7 @@ int connect_to_peer(context_t *ctx, char *sid, char* token, int port) {
 		handle_peer(ctx, peer, port, token);
 
 		write_log(LOG_INFO, "Shutting down\n");
-		exit(1);
+		exit(EXIT_SUCCESS);
 	}
 
 	// eclipse is not smart enough
@@ -2292,19 +2292,129 @@ int create_compressed_file_list(context_t *ctx) {
 
 }
 
+int handle_hub(context_t *ctx, char*hub_address, int hub_port) {
+
+	write_log(LOG_INFO, "Connecting to hub...\n");
+
+	const char *err;
+	int sd, ret;
+
+	gnutls_session_t session;
+	gnutls_certificate_credentials_t xcred;
+
+	sd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if ( sd < 0 ) {
+		write_log(LOG_CRITICAL, "Unable to open socket\n");
+		return -1;
+	}
+
+
+	int optval = 1;
+	if(setsockopt(sd, SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval)) < 0) {
+		write_log(LOG_CRITICAL, "Unable to set keep-alive on socket\n");
+		return -1;
+	}
+
+	struct hostent* remote = gethostbyname(hub_address);
+
+	if ( remote == NULL) {
+		write_log(LOG_CRITICAL, "Unable to resolve hub address\n");
+		return -1;
+	}
+
+	struct sockaddr_in addr;
+
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(hub_port);
+	addr.sin_addr.s_addr = ((struct in_addr*) remote->h_addr_list[0])->s_addr;
+
+	if ( connect(sd, (struct sockaddr*) &addr, sizeof(addr)) < 0 ) {
+		write_log(LOG_CRITICAL, "Unable to connect to remote hub");
+		return -1;
+	}
+
+	gnutls_certificate_allocate_credentials (&xcred);
+	gnutls_certificate_set_verify_function (xcred, _verify_certificate_callback);
+
+	gnutls_init (&session, GNUTLS_CLIENT);
+
+	ret = gnutls_priority_set_direct (session, "NORMAL", &err);
+	if (ret < 0) {
+		if (ret == GNUTLS_E_INVALID_REQUEST) {
+			gnutls_deinit(session);
+			gnutls_certificate_free_credentials(xcred);
+			write_log(LOG_CRITICAL, "Syntax error at: %s\n", err);
+		}
+		return -1;
+	}
+
+	gnutls_credentials_set (session, GNUTLS_CRD_CERTIFICATE, xcred);
+
+
+	gnutls_transport_set_ptr (session, (gnutls_transport_ptr_t) (intptr_t) sd);
+
+	do {
+		ret = gnutls_handshake (session);
+	} while (ret < 0 && gnutls_error_is_fatal (ret) == 0);
+
+	if ( ret < 0 ) {
+		gnutls_certificate_free_credentials(xcred);
+		gnutls_deinit(session);
+		write_log(LOG_CRITICAL, "TLS Handshake failed\n");
+		gnutls_perror(ret);
+		return -1;
+	} else {
+		write_log(LOG_INFO, "Handshake with hub completed\n");
+	}
+
+	ctx->sd = sd;
+	ctx->session = session;
+	ctx->state = STATE_PROTOCOL;
+
+	ctx->first_peer = NULL;
+
+	send_message(ctx, "HSUP ADBASE ADTIGR\n");
+
+	while ( 1 ) {
+
+		ret = process_message_from_hub(ctx);
+
+		if (ret < 0) {
+
+			peer_t *next_peer = ctx->first_peer;
+
+			while ( next_peer != NULL) {
+				peer_t *current_peer = next_peer;
+				next_peer = current_peer->next;
+				free(current_peer);
+			}
+
+			gnutls_deinit(session);
+			gnutls_certificate_free_credentials(xcred);
+
+			write_log(LOG_INFO, "Disconnected\n");
+			close(sd);
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
 int main (int argc, char** argv ) {
 
 	if ( argc < 7) {
 
 		printf("usage: miniadc hub port nick password root index [log]\n");
-		exit(1);
+		exit(EXIT_FAILURE);
 	}
 
 	char *hub_address = argv[1];
 	int hub_port = atoi(argv[2]);
 	if ( hub_port == 0) {
 		printf("Invalid hub port\n");
-		exit(1);
+		exit(EXIT_FAILURE);
 	}
 	char *nickname = argv[3];
 	char *password = argv[4];
@@ -2317,16 +2427,16 @@ int main (int argc, char** argv ) {
 
 		if ( log_file == NULL) {
 			printf("Unable to open log file\n");
-			exit(1);
+			exit(EXIT_FAILURE);
 		}
 
 		pid_t pid, sid;
 
 		pid = fork();
 		if (pid < 0) {
-			exit(1);
+			exit(EXIT_FAILURE);
 		} else if ( pid > 0) {
-			exit(0);
+			exit(EXIT_SUCCESS);
 		}
 
 		sid = setsid();
@@ -2352,94 +2462,29 @@ int main (int argc, char** argv ) {
 
 	if ( ctx.root_dir == NULL) {
 		write_log(LOG_CRITICAL, "Unable to index shared directory\n");
-		exit(1);
+		exit(EXIT_FAILURE);
 	}
 
 	if ( create_compressed_file_list(&ctx) != 0 ) {
-		exit(1);
+		exit(EXIT_FAILURE);
 	}
 
-	write_log(LOG_INFO, "Connecting to hub...\n");
-
-	const char *err;
-	int sd, ret;
-
-	gnutls_session_t session;
-	gnutls_certificate_credentials_t xcred;
-
-	gnutls_global_init ();
-
-	gnutls_certificate_allocate_credentials (&xcred);
-	gnutls_certificate_set_verify_function (xcred, _verify_certificate_callback);
-
-	gnutls_init (&session, GNUTLS_CLIENT);
-
-	ret = gnutls_priority_set_direct (session, "NORMAL", &err);
-	if (ret < 0) {
-		if (ret == GNUTLS_E_INVALID_REQUEST) {
-			write_log(LOG_CRITICAL, "Syntax error at: %s\n", err);
-		}
-		exit (1);
-	}
-	
-	gnutls_credentials_set (session, GNUTLS_CRD_CERTIFICATE, xcred);
-
-	sd = socket(AF_INET, SOCK_STREAM, 0);
-
-	struct hostent* remote = gethostbyname(hub_address);
-
-	if ( remote == NULL) {
-		write_log(LOG_CRITICAL, "Unable to resolve hub address");
-		exit(1);
-	}
-
-	struct sockaddr_in addr;
-
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(hub_port);
-	addr.sin_addr.s_addr = ((struct in_addr*) remote->h_addr_list[0])->s_addr;
-
-	if ( connect(sd, (struct sockaddr*) &addr, sizeof(addr)) < 0 ) {
-		write_log(LOG_CRITICAL, "Unable to connect to remote hub");
-		exit(1);
-	}
-
-	gnutls_transport_set_ptr (session, (gnutls_transport_ptr_t) (intptr_t) sd);
-
-	do {
-		ret = gnutls_handshake (session);
-	} while (ret < 0 && gnutls_error_is_fatal (ret) == 0);
-
-	if ( ret < 0 ) {
-		write_log(LOG_CRITICAL, "TLS Handshake failed\n");
-		gnutls_perror(ret);
-	} else {
-		write_log(LOG_INFO, "Handshake with hub completed\n");
-	}
-
-	ctx.sd = sd;
-	ctx.session = session;
-	ctx.state = STATE_PROTOCOL;
+	ctx.nickname = nickname;
+	ctx.password = password;
 
 	create_pid(ctx.pid);
 	create_cid(ctx.pid, ctx.cid);
 
-	ctx.nickname = nickname;
-	ctx.password = password;
-	ctx.first_peer = NULL;
+	gnutls_global_init ();
 
-	send_message(&ctx, "HSUP ADBASE ADTIGR\n");
 
-	while ( 1 ) {
-
-		ret = process_message_from_hub(&ctx);
-
-		if (ret < 0) {
-			write_log(LOG_INFO, "Disconnected\n");
-			exit(1);
-		}
+	while ( 1) {
+		handle_hub(&ctx, hub_address, hub_port);
+		sleep(10);
 	}
 
+
+	return EXIT_FAILURE;
 
 }
 
