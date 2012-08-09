@@ -28,6 +28,7 @@
 #include <time.h>
 #include <limits.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #define MAX_STR_LEN 1500
 #define HASH_LEN 24
@@ -99,6 +100,40 @@ enum {
 	STATE_NORMAL,
 	STATE_DATA
 };
+
+char *process_name = "main";
+FILE *log_file;
+
+enum {
+	LOG_DEBUG,
+	LOG_WARNING,
+	LOG_CRITICAL,
+	LOG_INFO
+};
+
+void write_log(int priority, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+
+    fprintf(log_file, "%s: ", process_name);
+
+    char now[100];
+
+    time_t lt = time(NULL);
+
+    strftime(now, 100, "%F %T ", localtime(&lt));
+
+    fprintf(log_file, now);
+
+    vfprintf(log_file, format, args);
+
+    fflush(log_file);
+
+    va_end(args);
+
+}
+
 
 int send_message( context_t* ctx, char* message );
 
@@ -284,7 +319,7 @@ int compute_tth(file_t *file) {
 		fclose(index);
 	}
 
-	printf("Hashing file %s\n", file->fullpath);
+	write_log(LOG_INFO, "Hashing file %s\n", file->fullpath);
 
 	FILE *f = fopen(file->fullpath, "r");
 
@@ -506,7 +541,7 @@ dir_t* index_directory(char *path, char* index_dir) {
 	DIR* dir = opendir(path);
 
 	if (dir == NULL) {
-		printf("Cannot find directory %s\n", path);
+		write_log(LOG_WARNING, "Cannot find directory %s\n", path);
 		free(d->name);
 		free(d);
 		return NULL;
@@ -614,10 +649,10 @@ int skip_unknown_message(context_t *ctx) {
 		ret = gnutls_record_recv (ctx->session, &ch, 1);
 
 		if ( ret < 0 ) {
-			fprintf (stderr, "Error: %s\n", gnutls_strerror (ret));
+			write_log(LOG_CRITICAL, "Error: %s\n", gnutls_strerror (ret));
 			return -1;
 		} else if ( ret == 0 ) {
-			printf ("Peer has closed the TLS connection\n");
+			write_log(LOG_INFO, "Peer has closed the TLS connection\n");
 			return -1;
 		}
 		
@@ -643,7 +678,7 @@ int read_message_from_client(int fd, char *data, int len) {
 		if ( ret < 0 ) {
 			return -1;
 		} else if ( ret == 0 ) {
-			printf ("Peer has closed connection\n");
+			write_log(LOG_INFO, "Peer has closed connection\n");
 			return -1;
 		}
 
@@ -657,7 +692,7 @@ int read_message_from_client(int fd, char *data, int len) {
 	}
 
 	if (idx == len) {
-		printf ("Received message too long\n");
+		write_log(LOG_WARNING, "Received message too long\n");
                 return -1;
 	}
 
@@ -678,10 +713,10 @@ int read_message(context_t *ctx, char *data, int len) {
 		ret = gnutls_record_recv (ctx->session, data + idx, 1);
 
 		if ( ret < 0 ) {
-			fprintf (stderr, "Error: %s\n", gnutls_strerror (ret));
+			write_log(LOG_CRITICAL, "Error: %s\n", gnutls_strerror (ret));
 			return -1;
 		} else if ( ret == 0 ) {
-			printf ("Peer has closed the TLS connection\n");
+			write_log(LOG_INFO, "Peer has closed the TLS connection\n");
 			return -1;
 		}
 
@@ -694,7 +729,7 @@ int read_message(context_t *ctx, char *data, int len) {
 	}
 
 	if (idx == len) {
-		printf ("Received message too long\n");
+		write_log(LOG_WARNING, "Received message too long\n");
                 return -1;
 	}
 
@@ -1064,13 +1099,13 @@ int send_files_list(context_t *ctx, int fd) {
 
 	sprintf(message, format, ctx->index_len);
 
-	printf("Sending file list...\n");
+	write_log(LOG_INFO, "Sending file list...\n");
 
 	send_message_to_client(fd, message);
 
 	send(fd, ctx->index, ctx->index_len, 0);
 
-	printf("File list sent\n");
+	write_log(LOG_INFO, "File list sent\n");
 
 
 	return 0;
@@ -1186,7 +1221,7 @@ int send_tth_list(context_t* ctx, int fd, char* file_hash, long start_pos, long 
 
 	if  (file ==  NULL) {
 		send_message_to_client(fd, "CSTA 151 file\\snot\\savailable\n");
-		printf("File not found\n");
+		write_log(LOG_WARNING, "File not found\n");
 		return -1;
 	}
 
@@ -1255,19 +1290,19 @@ int send_file(context_t *ctx, int fd, char* file_name, long start_pos, long byte
 		file_t *f = find_file_with_hash(ctx->root_dir, hash);
 
 		if ( f == NULL) {
-			printf("Cannot find file with hash %s", file_name);
+			write_log(LOG_WARNING, "Cannot find file with hash %s", file_name);
 			return -1;
 		}
 
 		FILE *f2 = fopen(f->fullpath, "r");
 
 		if ( f2 == NULL) {
-			printf("Unable to open file %s\n",f->fullpath);
+			write_log(LOG_WARNING, "Unable to open file %s\n",f->fullpath);
 			return -1;
 		}
 
 		if ( fseek(f2, start_pos, SEEK_SET) < 0 ) {
-			printf("Unable to seek file %s to position %ld\n",f->fullpath, start_pos );
+			write_log(LOG_WARNING, "Unable to seek file %s to position %ld\n",f->fullpath, start_pos );
 			fclose(f2);
 			return -1;
 		}
@@ -1297,13 +1332,13 @@ int send_file(context_t *ctx, int fd, char* file_name, long start_pos, long byte
 			r = fread(buf, 1, len, f2 );
 
 			if ( r < len) {
-				printf("Error while reading\n");
+				write_log(LOG_WARNING, "Error while reading\n");
 				fclose(f2);
 				return -1;
 			}
 
 			if ( send(fd, buf, r, 0) < 0 ) {
-				printf("Problem while sending data to remote peer\n");
+				write_log(LOG_WARNING, "Problem while sending data to remote peer\n");
 				fclose(f2);
 				return -1;
 			}
@@ -1314,7 +1349,7 @@ int send_file(context_t *ctx, int fd, char* file_name, long start_pos, long byte
 		fclose(f2);
 
 	} else {
-		printf("Cannot support paths\n");
+		write_log(LOG_WARNING, "Cannot support paths\n");
 	}
 
 	return 0;
@@ -1369,7 +1404,7 @@ int handle_peer( context_t *ctx, peer_t *peer, int port, char* token) {
 	addr.sin_port = htons(port);
 	addr.sin_addr = peer->addr4;
 
-	printf("Connecting to %s:%d\n", peer->sid, port);
+	write_log(LOG_INFO, "Connecting to %s:%d\n", peer->sid, port);
 
 	int ret = connect(fd, (struct sockaddr *) &addr, sizeof(addr));
 
@@ -1378,7 +1413,7 @@ int handle_peer( context_t *ctx, peer_t *peer, int port, char* token) {
 		return -1;
 	}
 
-	printf("Connected to %s\n", peer->sid);
+	write_log(LOG_INFO, "Connected to %s\n", peer->sid);
 
 	/* send SUP message */
 
@@ -1413,7 +1448,7 @@ int handle_peer( context_t *ctx, peer_t *peer, int port, char* token) {
 	while (tmp != NULL) {
 		if (strncmp(tmp, "ID", 2) == 0) {
 			if ( strcmp(tmp + 2, peer->cid) != 0) {
-				printf("We connected to the wrong peer '%s' vs '%s'\n", tmp+2, peer->cid);
+				write_log(LOG_WARNING, "We connected to the wrong peer '%s' vs '%s'\n", tmp+2, peer->cid);
 			}
 		}
 
@@ -1459,20 +1494,32 @@ int connect_to_peer(context_t *ctx, char *sid, char* token, int port) {
 	}
 
 	if ( peer == NULL) {
-		printf("Received connection request from inexistent peer\n");
+		write_log(LOG_WARNING, "Received connection request from inexistent peer\n");
 		return -1;
 	}
 
 	pid_t pid = fork();
 
 	if ( pid < 0 ) {
-		printf("Can't fork\n");
+		write_log(LOG_CRITICAL, "Can't fork\n");
 		return -1;
 	} else if ( pid == 0 ){
 		// parent
 		return 0;
 	} else {
+
+		char*format = "peer-%s";
+		char *tmp_process_name = (char*) malloc( strlen(format) + SID_LEN + 1 );
+
+		sprintf(tmp_process_name, format, peer->sid);
+
+		process_name = tmp_process_name;
+
+		write_log(LOG_INFO, "Started\n");
+
 		handle_peer(ctx, peer, port, token);
+
+		write_log(LOG_INFO, "Shutting down\n");
 		exit(1);
 	}
 
@@ -1481,8 +1528,6 @@ int connect_to_peer(context_t *ctx, char *sid, char* token, int port) {
 }
 
 int process_d_message(context_t* ctx, char *message) {
-
-	printf("Received D message %s\n", message);
 
 	char *tmp = strtok(message, " ");
 	if ( strlen(tmp) != 3) return -1;
@@ -1525,6 +1570,8 @@ int process_d_message(context_t* ctx, char *message) {
 
 		connect_to_peer(ctx, source_sid, token, port);
 
+	} else {
+		write_log(LOG_DEBUG, "Unknown D message\n");
 	}
 
 	return 0;
@@ -1661,8 +1708,6 @@ void find_results_in_dir(context_t *ctx, dir_t *dir, search_criteria_t* first_cr
 				send_message(ctx, result);
 
 				free(virtual_path_escaped);
-
-				printf("%s\n", result);
 
 		}
 
@@ -1865,7 +1910,7 @@ int process_inf_command(context_t* ctx, char* sid, char *message_args) {
 		} else if ( strncmp(next, "I4", 2) == 0) {
 
 			if ( inet_aton(next+2, &addr) == 0 ) {
-				printf("Error parsing address\n");
+				write_log(LOG_WARNING, "Error parsing address\n");
 			}
 			addrFound = 1;
 
@@ -1882,7 +1927,7 @@ int process_inf_command(context_t* ctx, char* sid, char *message_args) {
 		peer->next = ctx->first_peer;
 		ctx->first_peer = peer;
 
-		printf("Peer %s (%s) on ip %s available\n", peer->nick, peer->sid, inet_ntoa(addr));
+		write_log(LOG_INFO, "Peer %s (%s) on ip %s available\n", peer->nick, peer->sid, inet_ntoa(addr));
 
 	} else {
 
@@ -1890,17 +1935,17 @@ int process_inf_command(context_t* ctx, char* sid, char *message_args) {
 			free(peer->nick);
 			peer->nick = (char *) malloc(strlen(nick) + 1);
 			strcpy(peer->nick, nick);
-			printf("Peer %s (%s) changed name\n", peer->nick, peer->sid);
+			write_log(LOG_INFO, "Peer %s (%s) changed name\n", peer->nick, peer->sid);
 		}
 
 		if (addrFound) {
 			peer->addr4 = addr;
-			printf("Peer %s (%s) changed IP to %s\n", peer->nick, peer->sid, inet_ntoa(addr));
+			write_log(LOG_INFO, "Peer %s (%s) changed IP to %s\n", peer->nick, peer->sid, inet_ntoa(addr));
 		}
 
 		if (cidFound) {
 			memcpy(peer->cid, cid, HASH_LEN_B32);
-			printf("Peer %s (%s) changed CID\n", peer->nick, peer->sid);
+			write_log(LOG_INFO, "Peer %s (%s) changed CID\n", peer->nick, peer->sid);
 		}
 
 
@@ -1917,8 +1962,6 @@ int process_b_message(context_t* ctx, char *message) {
 	if ( strlen(message) < 5 ) {
 		return -1;
 	}
-
-	printf("%s\n", message);
 
 	char command[4];
 	memcpy(command, message, 3);
@@ -1939,7 +1982,7 @@ int process_b_message(context_t* ctx, char *message) {
 		return process_inf_command(ctx, sid, message_args);
 
 	} else {
-		printf("Received B message %s\n", message);
+		write_log(LOG_DEBUG, "Unknown B message\n");
 	}
 
 	return 0;
@@ -1951,8 +1994,6 @@ int process_f_message(context_t* ctx, char *message) {
 	if ( strlen(message) < 5 ) {
 		return -1;
 	}
-
-	printf("%s\n", message);
 
 	char command[4];
 	memcpy(command, message, 3);
@@ -1976,7 +2017,7 @@ int process_f_message(context_t* ctx, char *message) {
 		return process_sch_command(ctx, sid, message_args);
 
 	} else {
-		printf("Received F message %s\n", message);
+		write_log(LOG_WARNING, "Unknown F message\n");
 	}
 
 	return 0;
@@ -1999,7 +2040,7 @@ int process_i_message(context_t* ctx, char *message) {
 			
 		char *desc_d = remove_adc_escapes(desc);
 
-		printf("Hub says %d with message %s\n", code, desc_d);
+		write_log(LOG_INFO, "Hub says %d with message %s\n", code, desc_d);
 
 		free(desc_d);
 
@@ -2016,7 +2057,7 @@ int process_i_message(context_t* ctx, char *message) {
 			} else if ( strncmp(pos, "RM", 2) == 0) {
 				enable = 0;
 			} else {
-				printf("Invalid SUP message\n");
+				write_log(LOG_WARNING, "Invalid SUP message\n");
 				return -1;
 			}
 
@@ -2030,7 +2071,7 @@ int process_i_message(context_t* ctx, char *message) {
 			} else if ( strcmp(pos, "PING") == 0 ) {
 				ctx->features.ping = enable;
 			} else {
-				printf("Unsupported feature %s received\n", pos);
+				write_log(LOG_WARNING, "Unsupported feature %s received\n", pos);
 			}
 					
 		}
@@ -2039,7 +2080,7 @@ int process_i_message(context_t* ctx, char *message) {
 		if ( ctx->state != STATE_PROTOCOL) return -1;
 
 		if ( strlen(message) != 8 ) {
-			printf("Invalid SID received\n");
+			write_log(LOG_WARNING, "Invalid SID received\n");
 		}
 
 		if ( sscanf(message, "SID %s", ctx->sid) < 1) {
@@ -2071,7 +2112,7 @@ int process_i_message(context_t* ctx, char *message) {
 				}
 					
 				char *desc_d = remove_adc_escapes(desc);
-				printf("Hub> %s\n", desc_d);
+				write_log(LOG_INFO, "hub: %s\n", desc_d);
 				free(desc_d);
 			}
 
@@ -2103,7 +2144,7 @@ int process_i_message(context_t* ctx, char *message) {
 		char *sid = strtok(NULL, " ");
 
 		if ( strcmp(sid, ctx->sid) == 0) {
-			printf("Server is kicking me\n");
+			write_log(LOG_INFO, "Server is kicking me\n");
 			return -1;
 		}
 
@@ -2122,7 +2163,7 @@ int process_i_message(context_t* ctx, char *message) {
 			peer = peer->next;
 		}
 
-		printf("Peer %s disconnected\n", sid);
+		write_log(LOG_INFO, "Peer %s disconnected\n", sid);
 
 	} else if ( strncmp(message, "INF", 3) == 0) {
 
@@ -2145,14 +2186,14 @@ int process_i_message(context_t* ctx, char *message) {
 
 
 		if ( nick != NULL && desc != NULL) {
-			printf("Hub %s - %s\n", nick, desc);
+			write_log(LOG_INFO, "Connected to %s - %s\n", nick, desc);
 		}
 
 		if (  nick != NULL) free(nick);
 		if (  desc != NULL) free(desc);
 
 	} else {
-		printf("Received I message: %s\n", message);
+		write_log(LOG_WARNING, "Received unknown I message\n");
 	}
 
 	return 0;
@@ -2185,8 +2226,11 @@ int process_message_from_hub( context_t *ctx ) {
 
 	char type = message[0];
 
+	char *msg = strreplace(message, "\r", "");
 
-	printf("Received: %s\n", message);
+	write_log(LOG_DEBUG, "HUB: %s\n", msg);
+
+	free(msg);
 
 	/* check the type of message */
 	switch (type) {
@@ -2203,7 +2247,7 @@ int process_message_from_hub( context_t *ctx ) {
 			process_f_message(ctx, message + 1);
 			break;
 		default:
-			printf("Received: %s\n", message);
+			write_log(LOG_WARNING, "Unknown message type\n");
 			break;
 	}
 	
@@ -2219,10 +2263,10 @@ int send_message( context_t* ctx, char* message ) {
 	ret = gnutls_record_send (ctx->session, message, strlen (message));
 
 	if ( ret < 0 ) {
-                fprintf (stderr, "Error: %s\n", gnutls_strerror (ret));
+				write_log(LOG_CRITICAL, "Error: %s\n", gnutls_strerror (ret));
                 return -1;
         } else if ( ret == 0 ) {
-                printf ("Peer has closed the TLS connection\n");
+                write_log(LOG_INFO, "Hub has closed the TLS connection\n");
                 return -1;
         }
 
@@ -2230,17 +2274,17 @@ int send_message( context_t* ctx, char* message ) {
 }
 
 int create_compressed_file_list(context_t *ctx) {
-	printf("Creating file list...\n");
+	write_log(LOG_INFO, "Creating file list...\n");
 
 	char *list = create_complete_list(ctx);
 
 	ctx->index = (char *) malloc(strlen(list));
 	ctx->index_len = strlen(list);
 
-	printf("Compressing file list...\n");
+	write_log(LOG_INFO, "Compressing file list...\n");
 
 	if ( BZ2_bzBuffToBuffCompress(ctx->index, &(ctx->index_len), list, strlen(list), 1, 0, 0) != BZ_OK ) {
-		printf("Error while compressing file list\n");
+		write_log(LOG_CRITICAL, "Error while compressing file list\n");
 		return -1;
 	}
 
@@ -2250,9 +2294,9 @@ int create_compressed_file_list(context_t *ctx) {
 
 int main (int argc, char** argv ) {
 
-	if ( argc != 7) {
+	if ( argc < 7) {
 
-		printf("usage: miniadc hub port nick password root index\n");
+		printf("usage: miniadc hub port nick password root index [log]\n");
 		exit(1);
 	}
 
@@ -2267,25 +2311,55 @@ int main (int argc, char** argv ) {
 	char *root = argv[5];
 	char *index = argv[6];
 
+	if ( argc == 8) {
+
+		log_file = fopen(argv[7], "w");
+
+		if ( log_file == NULL) {
+			printf("Unable to open log file\n");
+			exit(1);
+		}
+
+		pid_t pid, sid;
+
+		pid = fork();
+		if (pid < 0) {
+			exit(1);
+		} else if ( pid > 0) {
+			exit(0);
+		}
+
+		sid = setsid();
+		if (sid < 0) {
+				exit(EXIT_FAILURE);
+		}
+
+	    close(STDIN_FILENO);
+	    dup2(fileno(log_file), STDERR_FILENO);
+	    dup2(fileno(log_file), STDOUT_FILENO);
+
+	} else {
+		log_file = stdout;
+	}
+
+
 	context_t ctx;
 
-	printf("Indexing files...\n");
+	write_log(LOG_INFO, "Indexing files...\n");
 
 	ctx.root_path = root;
 	ctx.root_dir = index_directory(root, index);
 
 	if ( ctx.root_dir == NULL) {
-		printf("Unable to index shared directory\n");
+		write_log(LOG_CRITICAL, "Unable to index shared directory\n");
 		exit(1);
 	}
-
-	printf("Creating file list...");
 
 	if ( create_compressed_file_list(&ctx) != 0 ) {
 		exit(1);
 	}
 
-	printf("Connecting to hub...\n");
+	write_log(LOG_INFO, "Connecting to hub...\n");
 
 	const char *err;
 	int sd, ret;
@@ -2303,7 +2377,7 @@ int main (int argc, char** argv ) {
 	ret = gnutls_priority_set_direct (session, "NORMAL", &err);
 	if (ret < 0) {
 		if (ret == GNUTLS_E_INVALID_REQUEST) {
-			fprintf (stderr, "Syntax error at: %s\n", err);
+			write_log(LOG_CRITICAL, "Syntax error at: %s\n", err);
 		}
 		exit (1);
 	}
@@ -2315,7 +2389,7 @@ int main (int argc, char** argv ) {
 	struct hostent* remote = gethostbyname(hub_address);
 
 	if ( remote == NULL) {
-		perror("Unable to resolve remote address");
+		write_log(LOG_CRITICAL, "Unable to resolve hub address");
 		exit(1);
 	}
 
@@ -2326,7 +2400,7 @@ int main (int argc, char** argv ) {
 	addr.sin_addr.s_addr = ((struct in_addr*) remote->h_addr_list[0])->s_addr;
 
 	if ( connect(sd, (struct sockaddr*) &addr, sizeof(addr)) < 0 ) {
-		perror("Unable to connect to remote host");
+		write_log(LOG_CRITICAL, "Unable to connect to remote hub");
 		exit(1);
 	}
 
@@ -2337,10 +2411,10 @@ int main (int argc, char** argv ) {
 	} while (ret < 0 && gnutls_error_is_fatal (ret) == 0);
 
 	if ( ret < 0 ) {
-		fprintf (stderr, "TLS Handshake failed\n");
+		write_log(LOG_CRITICAL, "TLS Handshake failed\n");
 		gnutls_perror(ret);
 	} else {
-		printf("Handshake completed\n");
+		write_log(LOG_INFO, "Handshake with hub completed\n");
 	}
 
 	ctx.sd = sd;
@@ -2357,10 +2431,11 @@ int main (int argc, char** argv ) {
 	send_message(&ctx, "HSUP ADBASE ADTIGR\n");
 
 	while ( 1 ) {
+
 		ret = process_message_from_hub(&ctx);
 
 		if (ret < 0) {
-			printf("Disconnected\n");
+			write_log(LOG_INFO, "Disconnected\n");
 			exit(1);
 		}
 	}
