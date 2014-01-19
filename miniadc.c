@@ -2288,6 +2288,8 @@ int create_compressed_file_list(context_t *ctx) {
 		return -1;
 	}
 
+	free(list);
+
 	return 0;
 
 }
