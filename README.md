@@ -1,4 +1,4 @@
-# `miniadc`: Minimalistic implementation of a Advanced Direct Connect (ADC) server
+#Minimalistic ADC server
 
 **WARNING:** This code is just a prototype. It may or may not work and it may contain major security issues.
 
