@@ -6,4 +6,4 @@ LDFLAGS = -L/home/lokeller/Workspaces/MiniADC/deps_binary/lib  -lgnutls  -lnettl
 miniadc : miniadc.o tiger/tiger.o tiger/sboxes.c ../deps_binary/lib/libbz2.a
 
 clean : 
-	rm -rf *.o miniadc
+	rm -rf *.o miniadc tiger/*.o
